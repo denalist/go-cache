@@ -3,7 +3,7 @@ package cache
 
 import (
 	"container/list"
-	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -13,14 +13,11 @@ type Cache struct {
 	lruList  *list.List
 	capacity int
 	mutex    sync.RWMutex
-}
 
-// LRU for eviction to maintain cache capacity, most frequent used -> .. -> least frequent used
-// Hash map (for search ) + Doubly linked list
-type entry struct {
-	Key        string
-	Value      interface{}
-	Expiration int64
+	// Metrics
+	hits      int64
+	misses    int64
+	evictions int64
 }
 
 // Constructor- Go doesnt have build in constructor like python def __init__()
@@ -29,11 +26,11 @@ type entry struct {
 
 // maps must be initialised before use , so we create a empty map: map[string]item.Item, string
 // is the datatype of key and item.Item is the value type
-func NewCache() *Cache {
+func NewCache(capacity int) *Cache {
 	c := &Cache{
 		data:     make(map[string]*list.Element),
 		lruList:  list.New(),
-		capacity: 100,
+		capacity: capacity,
 	}
 
 	go c.startCleanup()
@@ -45,8 +42,12 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	expiration := time.Now().Add(ttl).UnixNano()
-	entry := &entry{
+	var expiration int64
+	if ttl > 0 {
+		expiration = time.Now().Add(ttl).UnixNano()
+	}
+
+	newEntry := &entry{
 		Key:        key,
 		Value:      value,
 		Expiration: expiration,
@@ -55,10 +56,14 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 	element, found := c.data[key]
 
 	if found {
+		// if found, update the entry val, update EXP and move to the front
+		existing := element.Value.(*entry) // type assertion, converts interface{} → *entry
+		existing.Value = value             // struct field assignment use "="
+		existing.Expiration = expiration
 		c.lruList.MoveToFront(element)
-		c.data[key] = element
+
 	} else {
-		element := c.lruList.PushFront(entry)
+		element := c.lruList.PushFront(newEntry)
 		c.data[key] = element // the value expects List.element
 	}
 
@@ -71,6 +76,8 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 			// list.Element.Value stores *entry
 			evicted := last.Value.(*entry) // first convert the value back to *entry.
 			delete(c.data, evicted.Key)
+
+			c.evictions++
 		}
 	}
 
@@ -83,23 +90,39 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 
 	res, found := c.data[key]
 	if !found {
+		c.misses++
 		return nil, false
 	}
 
-	if res.IsExpired() {
+	// convert the res back to entry
+	rec := res.Value.(*entry)
+
+	if rec.IsExpired() {
+		c.lruList.Remove(res)
 		delete(c.data, key)
+		c.misses++
 		return nil, false
 	}
 
-	return res.Value, true
+	c.lruList.MoveToFront(res)
+	c.hits++
+	return rec.Value, true
 }
 
 // delete values
-func (c *Cache) Delete(key string) {
+func (c *Cache) Delete(key string) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	element, found := c.data[key]
+
+	if !found {
+		return false
+	}
+
+	c.lruList.Remove(element)
 	delete(c.data, key)
+	return true
 }
 
 // clear values
@@ -107,7 +130,8 @@ func (c *Cache) Clear() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	c.data = make(map[string]Item)
+	c.data = make(map[string]*list.Element)
+	c.lruList = list.New()
 }
 
 // cleanup worker/ TTL expiration engine runs in background
@@ -116,13 +140,21 @@ func (c *Cache) startCleanup() {
 
 	for range ticker.C {
 		c.mutex.Lock()
-		defer c.mutex.Unlock()
-		for key, item := range c.data {
-			if item.IsExpired() {
+
+		for key, element := range c.data {
+			entry := element.Value.(*entry)
+			if entry.IsExpired() {
+				c.lruList.Remove(element)
 				delete(c.data, key)
 			}
 
-			fmt.Println("Clean up worker job completed.")
 		}
+
+		c.mutex.Unlock() // once exited, unlock to avoid deadlock issue
+		log.Println("cleanup worker job completed")
 	}
 }
+
+// TODO
+// Multi sharfds to reduce lock contention, dsitributed cache nodes over TCP
+// tests

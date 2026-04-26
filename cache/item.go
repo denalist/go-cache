@@ -2,16 +2,17 @@ package cache
 
 import "time"
 
-// import "fmt"
-
-type Item struct {
+// LRU for eviction to maintain cache capacity, most frequent used -> .. -> least frequent used
+// Hash map (for search ) + Doubly linked list
+type entry struct {
+	Key        string
 	Value      interface{}
 	Expiration int64
 }
 
-func (item Item) IsExpired() bool {
-	if item.Expiration == 0 {
+func (e entry) IsExpired() bool {
+	if e.Expiration == 0 {
 		return false
 	}
-	return time.Now().UnixNano() > item.Expiration
+	return time.Now().UnixNano() > e.Expiration
 }
