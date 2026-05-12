@@ -6,31 +6,37 @@ package main
 // lowercase are unexported. Dependencies flow one way: main → cache, never the reverse.
 
 import (
-	"fmt"
 	"go-cache/cache"
-
-	"github.com/gin-gonic/gin"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 
-	c := cache.NewCache(100)
+	dc := cache.NewSharedCache(4, 100)
 
-	metrics := c.GetMetrics()
-	fmt.Printf("hits=%d misses=%d evictions=%d size=%d\n",
-		metrics.Hits,
-		metrics.Misses,
-		metrics.Evictions,
-		metrics.Size,
-	)
+	// metrics := c.GetMetrics()
+	// fmt.Printf("hits=%d misses=%d evictions=%d size=%d\n",
+	// 	metrics.Hits,
+	// 	metrics.Misses,
+	// 	metrics.Evictions,
+	// 	metrics.Size,
+	// )
 
-	router := gin.Default()
+	srv, err := cache.NewServer(":8080", dc)
 
-	router.POST("/cache/:key", SetCacheValue(c))      // Create
-	router.PUT("/cache/:key", SetCacheValue(c))       // Update
-	router.GET("/cache/:key", GetCacheValue(c))       // Read
-	router.DELETE("/cache/:key", DeleteCacheValue(c)) // Delete
+	if err != nil {
+		log.Fatal(err)
+	}
+	go srv.Serve()
+	log.Println("cache server listening on :8080")
 
-	router.Run(":8080")
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit // blocks until Ctrl+C or kill signal
 
+	log.Println("shutting down")
+	srv.Close()
 }
